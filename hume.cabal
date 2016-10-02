@@ -1,0 +1,19 @@
+name:                hume
+version:             0.1.0.0
+synopsis:            Simple project template from stack
+description:         Please see README.md
+homepage:            https://github.com/caipre/hume#readme
+license:             BSD3
+license-file:        LICENSE
+author:              Nick Platt
+maintainer:          platt.nicholas@gmail.com
+copyright:           Copyright Nick Platt (c) 2016
+category:            Compilers/Interpreters
+build-type:          Simple
+cabal-version:       >=1.10
+
+executable hume
+  hs-source-dirs:      src
+  main-is:             main.hs
+  default-language:    Haskell2010
+  build-depends:       base >= 4.7 && < 5
