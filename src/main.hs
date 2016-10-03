@@ -6,11 +6,11 @@ import Text.ParserCombinators.Parsec hiding (spaces)
 symbol :: Parser Char
 symbol = oneOf "!#$%&|*+-/:<=>?@^_~"
 
-readExpr :: String -> String
+readExpr :: String -> LispVal
 readExpr input =
    case parse (spaces >> parseExpr) "lisp" input of
-     Left err -> "No match: " ++ show err
-     Right val -> "Found value: " ++ show val
+     Left err -> String $ "No match: " ++ show err
+     Right val -> val
 
 spaces :: Parser ()
 spaces = skipMany space
@@ -81,8 +81,38 @@ parseExpr = parseAtom
                 char ')'
                 return l
 
-main :: IO ()
-main = do
-   args <- getArgs
-   putStrLn (readExpr (args !! 0))
+apply :: String -> [LispVal] -> LispVal
+apply fn args = maybe (Bool False) ($ args) $ lookup fn primitives
 
+primitives :: [(String, [LispVal] -> LispVal)]
+primitives = [ ("+", numericBinop (+))
+             , ("-", numericBinop (-))
+             , ("*", numericBinop (*))
+             , ("/", numericBinop div)
+             , ("mod", numericBinop mod)
+             , ("quotient", numericBinop quot)
+             , ("rem", numericBinop rem)
+             ]
+
+numericBinop :: (Integer -> Integer -> Integer) -> [LispVal] -> LispVal
+numericBinop op args = Number $ foldl1 op $ map unpackNum args
+
+unpackNum :: LispVal -> Integer
+unpackNum (Number n) = n
+unpackNum (String n) =
+   let parsed = reads n :: [(Integer, String)] in
+       if null parsed
+          then 0
+          else fst $ parsed !! 0
+unpackNum (List [n]) = unpackNum n
+unpackNum _ = 0
+
+eval :: LispVal -> LispVal
+eval val@(String _) = val
+eval val@(Number _) = val
+eval val@(Bool _) = val
+eval (List [Atom "quote", val]) = val
+eval (List (Atom fn : args)) = apply fn $ map eval args
+
+main :: IO ()
+main = getArgs >>= print . eval . readExpr . head
