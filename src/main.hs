@@ -29,6 +29,8 @@ data LispVal = Atom String
              | PrimitiveFunc ([LispVal] -> ThrowsError LispVal)
              | Func { params :: [String], vararg :: (Maybe String),
                       body :: [LispVal], closure :: Env }
+             | IOFunc ([LispVal] -> IOThrowsError LispVal)
+             | Port Handle
 
 unwordsList :: [LispVal] -> String
 unwordsList = unwords . map showVal
@@ -47,6 +49,8 @@ showVal (Func {params = args, vararg = varargs, body = body, closure = env}) =
       (case varargs of
          Nothing -> ""
          Just arg -> " . " ++ arg) ++ ") ...)"
+showVal (IOFunc _) = "<io primitive>"
+showVal (Port _) = "<io port>"
 
 instance Show LispVal where show = showVal
 
@@ -138,11 +142,14 @@ symbol = oneOf "!#$%&|*+-/:<=>?@^_~"
 spaces :: Parser ()
 spaces = skipMany space
 
-readExpr :: String -> ThrowsError LispVal
-readExpr input =
-   case parse (spaces >> parseExpr) "lisp" input of
+readOrThrow :: Parser a -> String -> ThrowsError a
+readOrThrow parser input =
+   case parse parser "lisp" input of
      Left err -> throwError $ Parser err
      Right val -> return val
+
+readExpr = readOrThrow parseExpr
+readExprList = readOrThrow (endBy parseExpr spaces)
 
 parseString :: Parser LispVal
 parseString = do
@@ -195,6 +202,7 @@ parseExpr = parseAtom
 -- {{{
 
 apply :: LispVal -> [LispVal] -> IOThrowsError LispVal
+apply (IOFunc func) args = func args
 apply (PrimitiveFunc func) args = liftThrows $ func args
 apply (Func params varargs body closure) args =
    if num params /= num args && varargs == Nothing
@@ -209,8 +217,50 @@ apply (Func params varargs body closure) args =
                     Nothing -> return env
 
 primitiveBindings :: IO Env
-primitiveBindings = nullEnv >>= (flip bindVars $ map makePrimitiveFunc primitives)
-   where makePrimitiveFunc (var, func) = (var, PrimitiveFunc func)
+primitiveBindings =
+   nullEnv >>= (flip bindVars $ map (makeFunc IOFunc) ioPrimitives
+                              ++ map (makeFunc PrimitiveFunc) primitives)
+      where makeFunc constructor (var, func) = (var, constructor func)
+
+ioPrimitives :: [(String, [LispVal] -> IOThrowsError LispVal)]
+ioPrimitives = [ ("apply", applyProc)
+               , ("open-input-file", makePort ReadMode)
+               , ("open-output-file", makePort WriteMode)
+               , ("close-input-port", closePort)
+               , ("close-output-port", closePort)
+               , ("read", readProc)
+               , ("write", writeProc)
+               , ("read-contents", readContents)
+               , ("read-all", readAll)
+               ]
+
+applyProc :: [LispVal] -> IOThrowsError LispVal
+applyProc [func, List args] = apply func args
+applyProc (func : args) = apply func args
+
+makePort :: IOMode -> [LispVal] -> IOThrowsError LispVal
+makePort mode [String filename] = liftM Port $ liftIO $ openFile filename mode
+
+closePort :: [LispVal] -> IOThrowsError LispVal
+closePort [Port port] = liftIO $ hClose port >> (return $ Bool True)
+closePort _ = return $ Bool False
+
+readProc :: [LispVal] -> IOThrowsError LispVal
+readProc [] = readProc [Port stdin]
+readproc [Port port] = (liftIO $ hGetLine port) >>= liftThrows . readExpr
+
+writeProc :: [LispVal] -> IOThrowsError LispVal
+writeProc [obj] = writeProc [obj, Port stdout]
+writeProc [obj, Port port] = liftIO $ hPrint port obj >> (return $ Bool True)
+
+readContents :: [LispVal] -> IOThrowsError LispVal
+readContents [String filename] = liftM String $ liftIO $ readFile filename
+
+load :: String -> IOThrowsError [LispVal]
+load filename = (liftIO $ readFile filename) >>= liftThrows . readExprList
+
+readAll :: [LispVal] -> IOThrowsError LispVal
+readAll [String filename] = liftM List $ load filename
 
 primitives :: [(String, [LispVal] -> ThrowsError LispVal)]
 primitives = [ ("+", numericBinop (+))
@@ -348,8 +398,11 @@ until_ pred prompt action = do
       else action result >> until_ pred prompt action
 
 
-runOne :: String -> IO ()
-runOne expr = primitiveBindings >>= flip evalAndPrint expr
+runOne :: [String] -> IO ()
+runOne args = do
+   env <- primitiveBindings >>= flip bindVars [("args", List $ map String $ drop 1 args)]
+   (runIOThrows $ liftM show $ eval env (List [Atom "load", String (args !! 0)]))
+      >>= hPutStrLn stderr
 
 runRepl :: IO ()
 runRepl = primitiveBindings >>= until_ (== "quit") (readPrompt "[Lisp] ") . evalAndPrint
@@ -370,6 +423,8 @@ eval env (List [Atom "if", pred, conseq, alt]) =
                             case result of
                               Bool False -> eval env alt
                               otherwise -> eval env conseq
+
+eval env (List [Atom "load", String filename]) = load filename >>= liftM last . mapM (eval env)
 
 
 eval env (List (Atom "define" : List (Atom var : params) : body)) =
@@ -395,7 +450,4 @@ eval env badForm = throwError $ BadSpecialForm "Unrecognized special form" badFo
 
 main :: IO ()
 main = do args <- getArgs
-          case length args of
-            0 -> runRepl
-            1 -> runOne $ args !! 0
-            otherwise -> putStrLn "usage: hume [lisp expr]"
+          if null args then runRepl else runOne $ args
